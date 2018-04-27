@@ -64,7 +64,7 @@ void test_parse(void) {
     rd = ns_rr_rdata(rr_an);
 
     if (type == ns_t_a && rd != NULL) {
-      PRINTF("A result: %pI4\n", (struct __be32 *)rd);
+      PRINTF("A result: %pI4\n", (__be32*)rd);
     }
   }
 
