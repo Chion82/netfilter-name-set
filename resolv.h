@@ -1,4 +1,4 @@
-#define uchar unsigned char
+/* ported from glibc/resolv */
 
 /*
  * Define constants based on RFC 883, RFC 1034, RFC 1035

@@ -1,3 +1,5 @@
+/* ported from https://github.com/shadowsocks/ChinaDNS.git */
+
 #include <linux/kernel.h>
 #include <linux/types.h>
 

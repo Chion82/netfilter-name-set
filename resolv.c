@@ -1,3 +1,5 @@
+/* ported from glibc/resolv */
+
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/types.h>

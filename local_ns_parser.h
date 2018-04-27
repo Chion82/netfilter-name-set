@@ -1,3 +1,5 @@
+/* ported from https://github.com/shadowsocks/ChinaDNS.git */
+
 #ifndef LOCAL_NS_PARSER_H
 #define LOCAL_NS_PARSER_H
 
