@@ -8,13 +8,13 @@
 
 enum {
   O_HOOK_DNS_RESPONSE = 0,
-  O_SET_NAME,
 };
 
 enum {
   XT_NAMESET_HOOK_DNS_RESPONSE = 1 << 0,
   XT_NAMESET_SRC = 1 << 1,
   XT_NAMESET_DST = 1 << 2,
+  XT_NAMESET_MATCH_INVERTED = 1 << 3,
 };
 
 struct xt_nameset_info {
@@ -24,8 +24,6 @@ struct xt_nameset_info {
 
 static const struct xt_option_entry NAMESET_target_opts[] = {
   {.name = "hook-dns-response", .id = O_HOOK_DNS_RESPONSE, .type = XTTYPE_NONE,
-    .flags = XTOPT_MAND},
-  {.name = "set", .id = O_SET_NAME, .type = XTTYPE_STRING,
     .flags = XTOPT_MAND},
   XTOPT_TABLEEND,
 };
@@ -47,15 +45,6 @@ static void NAMESET_target_parse(struct xt_option_call *cb)
   case O_HOOK_DNS_RESPONSE:
     info->flags |= XT_NAMESET_HOOK_DNS_RESPONSE;
     break;
-  case O_SET_NAME:
-    if (strlen(cb->arg) <= 0 || strlen(cb->arg) > MAX_SET_NAME_LENGTH) {
-      xtables_error(PARAMETER_PROBLEM, "invalid set name (should be <= %d bytes)",
-        MAX_SET_NAME_LENGTH);
-      break;
-    }
-    memset(info->set_name, 0x00, NAME_SET_BUF_CAP);
-    strncpy(info->set_name, cb->arg, MAX_SET_NAME_LENGTH);
-    break;
   }
 }
 
@@ -71,7 +60,6 @@ static void NAMESET_target_print(const void *ip, const struct xt_entry_target *t
   if (info->flags & XT_NAMESET_HOOK_DNS_RESPONSE) {
     printf(" hook_dns_response");
   }
-  printf(" set %s", info->set_name);
 }
 
 static void NAMESET_target_save(const void *ip, const struct xt_entry_target *target)
@@ -80,14 +68,12 @@ static void NAMESET_target_save(const void *ip, const struct xt_entry_target *ta
   if (info->flags & XT_NAMESET_HOOK_DNS_RESPONSE) {
     printf(" --hook-dns-response");
   }
-  printf(" --set %s", info->set_name);
 }
 
 static void NAMESET_target_help(void)
 {
 
 }
-
 
 static struct xtables_target NAMESET_targets[] = {
   {

@@ -18,9 +18,10 @@
 
 #define HASHTABLE_BUCKET_BITS (10)
 
-#define DEFAULT_MAX_DNS_CACHE_LEN (10)
+#define DEFAULT_MAX_DNS_CACHE_LEN (8192)
 
-#define DNS_CACHE_MAX_CLEANUP (30)
+#define DNS_CACHE_MAX_CLEANUP (128)
+#define DNS_CACHE_GC_INTERVAL (2000)
 
 #define MAX_SET_NAME_LENGTH (20)
 #define NAME_SET_BUF_CAP (MAX_SET_NAME_LENGTH + 1)
@@ -74,6 +75,8 @@ static DEFINE_SPINLOCK(dns_cache_lock);
 static void gc_worker(struct work_struct *work);
 static struct workqueue_struct *wq __read_mostly;  
 static DECLARE_DELAYED_WORK(gc_worker_wk, gc_worker);
+
+static atomic_t cleanup;
 
 static void
 insert_dns_cache(struct dns_result* dr)
@@ -243,7 +246,8 @@ static void
 gc_worker(struct work_struct *work)
 {
   remove_outdated_dns_cache();
-  queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(500));
+  if (atomic_read(&cleanup) == 0)
+    queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(DNS_CACHE_GC_INTERVAL));
 }
 
 static int
@@ -304,11 +308,24 @@ parse_dns_response(const char* buf, const int length, struct dns_result* result)
   return 0;
 }
 
-// static bool
-// nameset_match4(const struct sk_buff *skb, struct xt_action_param *par)
-// {
+static int
+nameset_target4_checkentry(const struct xt_tgchk_param *par)
+{
+  return 0;
+}
 
-// }
+static void
+nameset_target4_destroy(const struct xt_tgdtor_param *par)
+{
+
+}
+
+static bool
+nameset_match4(const struct sk_buff *skb, struct xt_action_param *par)
+{
+  pr_debug("xt_nameset: match\n");
+  return 1;
+}
 
 // static bool
 // nameset_match6(const struct sk_buff *skb, struct xt_action_param *par)
@@ -316,11 +333,11 @@ parse_dns_response(const char* buf, const int length, struct dns_result* result)
 
 // }
 
-// static int
-// nameset_match4_checkentry(const struct xt_mtchk_param *par)
-// {
-
-// }
+static int
+nameset_match4_checkentry(const struct xt_mtchk_param *par)
+{
+  return 0;
+}
 
 // static int
 // nameset_match6_checkentry(const struct xt_mtchk_param *par)
@@ -328,28 +345,17 @@ parse_dns_response(const char* buf, const int length, struct dns_result* result)
 
 // }
 
-// static void
-// nameset_match4_destroy(const struct xt_mtdtor_param *par)
-// {
+static void
+nameset_match4_destroy(const struct xt_mtdtor_param *par)
+{
 
-// }
+}
 
 // static void
 // nameset_match6_destroy(const struct xt_mtdtor_param *par)
 // {
 
 // }
-
-static int
-nameset_target4_checkentry(const struct xt_tgchk_param *par)
-{
-  return 0;
-}
-
-static void nameset_target4_destroy(const struct xt_tgdtor_param *par)
-{
-
-}
 
 static unsigned int
 nameset_target4(struct sk_buff *skb, const struct xt_action_param *par)
@@ -403,34 +409,72 @@ nameset_target4(struct sk_buff *skb, const struct xt_action_param *par)
   return ret;
 }
 
+/* non-threadsafe. only for module cleanup. */
+static void
+destroy_all_dns_cache(void)
+{
+  struct list_head *iter, *tmp;
+  struct dns_cache_item *item;
+
+  list_for_each_safe(iter, tmp, &dns_cache_list) {
+   
+    item = list_entry(iter, struct dns_cache_item, list);
+    list_del(&(item->list));
+    hash_del(&(item->hash_node));
+
+    kfree(item->hostname);
+    kfree(item);
+  }
+
+  dns_cache_len = 0;
+}
+
 static struct xt_target nameset_targets[] __read_mostly = {
- {
-  .name       = "NAMESET",
-  .family     = NFPROTO_IPV4,
-  .revision   = 0,
-  .target     = nameset_target4,
-  .targetsize = sizeof(struct xt_nameset_info),
-  .checkentry = nameset_target4_checkentry,
-  .destroy    = nameset_target4_destroy,
-  .me         = THIS_MODULE,
- },
+  {
+    .name       = "NAMESET",
+    .family     = NFPROTO_IPV4,
+    .revision   = 0,
+    .target     = nameset_target4,
+    .targetsize = sizeof(struct xt_nameset_info),
+    .checkentry = nameset_target4_checkentry,
+    .destroy    = nameset_target4_destroy,
+    .me         = THIS_MODULE,
+    },
+};
+
+static struct xt_match nameset_matches[] __read_mostly = {
+  {
+    .name       = "nameset",
+    .family     = NFPROTO_IPV4,
+    .revision   = 0,
+    .match      = nameset_match4,
+    .matchsize  = sizeof(struct xt_nameset_info),
+    .checkentry = nameset_match4_checkentry,
+    .destroy    = nameset_match4_destroy,
+    .me         = THIS_MODULE,
+  },
 };
 
 static int __init nameset_init(void)
 {
+  atomic_set(&cleanup, 0);
   wq = create_singlethread_workqueue("xt_nameset");
   if (wq == NULL) {
     printk(KERN_ERR "xt_nameset: create_singlethread_workqueue() failed. xt_nameset not registered.\n");
     return 0;
   }
-  queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(500));
+  queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(DNS_CACHE_GC_INTERVAL));
   pr_debug("xt_nameset: nameset_init\n");
 
+  xt_register_matches(nameset_matches, ARRAY_SIZE(nameset_matches));
   return xt_register_targets(nameset_targets, ARRAY_SIZE(nameset_targets));
 }
 
 static void nameset_exit(void)
 {
+  atomic_set(&cleanup, 1);
+
+  xt_unregister_matches(nameset_matches, ARRAY_SIZE(nameset_matches));
   xt_unregister_targets(nameset_targets, ARRAY_SIZE(nameset_targets));
 
   cancel_delayed_work_sync(&gc_worker_wk);
@@ -438,6 +482,8 @@ static void nameset_exit(void)
     flush_workqueue(wq);
     destroy_workqueue(wq);
   }
+
+  destroy_all_dns_cache();
 }
 
 module_init(nameset_init);
