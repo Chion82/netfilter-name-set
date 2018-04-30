@@ -19,7 +19,15 @@ const char test_buf[] = {
   0xc5
 };
 
-void test_parse(void) {
+const char test6_buf[] = {
+  0xf3, 0xbe, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x03, 0x77, 0x77, 0x77,
+  0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x1c, 0x00, 0x01,
+  0xc0, 0x0c, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x01, 0x1d, 0x00, 0x10, 0x24, 0x04, 0x68, 0x00,
+  0x40, 0x08, 0x08, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x04, 0x00, 0x00, 0x29, 0x02,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+void test_parse(const char* buf, const int length) {
   ns_msg msg;
   ns_rr rr_qd, rr_an;
   int rrnum, rrmax_qd, rrmax_an, hostname_buf_size;
@@ -27,7 +35,7 @@ void test_parse(void) {
   u_int type;
   const u_char *rd;
 
-  if (local_ns_initparse((const u_char *)test_buf, sizeof(test_buf), &msg) < 0) {
+  if (local_ns_initparse((const u_char *)buf, length, &msg) < 0) {
     PRINTF("error: local_ns_initparse\n");
   }
 
@@ -66,6 +74,10 @@ void test_parse(void) {
     if (type == ns_t_a && rd != NULL) {
       PRINTF("A result: %pI4\n", (__be32*)rd);
     }
+
+    if (type == ns_t_aaaa && rd != NULL) {
+      PRINTF("AAAA result: %pI6\n", (struct in6_addr*)rd);
+    }
   }
 
   kfree(hostname_buf);
@@ -73,7 +85,9 @@ void test_parse(void) {
 
 int init_test_module(void) {
 
-  test_parse();
+  test_parse(test_buf, sizeof(test_buf));
+
+  test_parse(test6_buf, sizeof(test6_buf));
 
   return 0;
 
