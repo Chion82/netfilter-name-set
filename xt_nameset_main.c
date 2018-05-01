@@ -202,18 +202,17 @@ delete_one:
 
   item_to_remove = NULL;
 
-  if (dns_cache_len > max_dns_cache_len) {
+  if (dns_cache_len > max_dns_cache_len
+    && !(list_empty(&dns_cache_list))) {
     item_to_remove = list_last_entry(&dns_cache_list, struct dns_cache_item, list);
 
-    if (item_to_remove != NULL) {
-      list_del_rcu(&(item_to_remove->list));
-      hash_del_rcu(&(item_to_remove->hash_node));
+    list_del_rcu(&(item_to_remove->list));
+    hash_del_rcu(&(item_to_remove->hash_node));
 
-      dns_cache_len--;
-      remove_count++;
+    dns_cache_len--;
+    remove_count++;
 
-      pr_debug("xt_nameset: del dns cache: %s\n", item_to_remove->hostname);
-    }
+    pr_debug("xt_nameset: del dns cache: %s\n", item_to_remove->hostname);
   }
 
   spin_unlock(&dns_cache_lock);
