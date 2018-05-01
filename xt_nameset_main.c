@@ -20,7 +20,6 @@
 
 #define DEFAULT_MAX_DNS_CACHE_LEN (8192)
 
-#define DNS_CACHE_MAX_CLEANUP (128)
 #define DNS_CACHE_GC_INTERVAL (2000)
 
 #define MAX_SET_NAME_LENGTH (20)
@@ -192,39 +191,28 @@ insert_dns_cache(struct dns_result* dr)
 static int
 remove_outdated_dns_cache(void)
 {
-  int remove_count, i;
-  struct list_head *iter, *tmp;
-  struct dns_cache_item *item;
-  struct dns_cache_item *cache_to_remove[DNS_CACHE_MAX_CLEANUP];
+  int remove_count;
+  struct dns_cache_item *item_to_remove;
 
-  for (i = 0; i < DNS_CACHE_MAX_CLEANUP; i++) {
-    cache_to_remove[i] = NULL;
-  }
+  remove_count = 0;
+
+delete_one:
 
   spin_lock(&dns_cache_lock);
 
-  remove_count = min(dns_cache_len - max_dns_cache_len, DNS_CACHE_MAX_CLEANUP);
+  item_to_remove = NULL;
 
-  if (remove_count <= 0) {
-    spin_unlock(&dns_cache_lock);
-    return 0;
-  }
+  if (dns_cache_len > max_dns_cache_len) {
+    item_to_remove = list_last_entry(&dns_cache_list, struct dns_cache_item, list);
 
-  i = 0;
-  list_for_each_prev_safe(iter, tmp, &dns_cache_list) {
-    dns_cache_len--;
+    if (item_to_remove != NULL) {
+      list_del_rcu(&(item_to_remove->list));
+      hash_del_rcu(&(item_to_remove->hash_node));
 
-    item = list_entry(iter, struct dns_cache_item, list);
+      dns_cache_len--;
+      remove_count++;
 
-    list_del_rcu(&(item->list));
-    hash_del_rcu(&(item->hash_node));
-    cache_to_remove[i] = item;
-
-    pr_debug("xt_nameset: del dns cache: %s\n", item->hostname);
-
-    i++;
-    if (i >= remove_count) {
-      break;
+      pr_debug("xt_nameset: del dns cache: %s\n", item_to_remove->hostname);
     }
   }
 
@@ -232,11 +220,10 @@ remove_outdated_dns_cache(void)
 
   synchronize_rcu();
 
-  for (i = 0; i < remove_count; i++) {
-    if (cache_to_remove[i] != NULL) {
-      kfree((cache_to_remove[i])->hostname);
-      kfree(cache_to_remove[i]);
-    }
+  if (item_to_remove != NULL) {
+    kfree(item_to_remove->hostname);
+    kfree(item_to_remove);
+    goto delete_one;
   }
 
   return remove_count;
@@ -292,12 +279,14 @@ parse_dns_response(const char* buf, const int length, struct dns_result* result)
     type = ns_rr_type(rr_an);
     rd = ns_rr_rdata(rr_an);
 
-    if (type == ns_t_a && rd != NULL) {
+    if (type == ns_t_a && rd != NULL
+      && result->a_result_len < DNS_RESULT_MAX_RR_LEN) {
       result->a_result[result->a_result_len] = *((__be32*)rd);
       result->a_result_len ++;
     }
 
-    if (type == ns_t_aaaa && rd != NULL) {
+    if (type == ns_t_aaaa && rd != NULL
+      && result->aaaa_result_len < DNS_RESULT_MAX_RR_LEN) {
       for (tmp = 0; tmp < 4; tmp++) {
         result->aaaa_result[result->aaaa_result_len][tmp] = *((__be32*)rd + tmp);
       }
