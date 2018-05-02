@@ -193,65 +193,107 @@ kill_match_result(struct match_result *result)
   kfree(result);
 }
 
-static void
-insert_nameset_record(struct nameset_record* record)
+static int
+insert_nameset_record(const char* setname, const char* hostname)
 {
-  uint hash = full_name_hash(salt, record->hostname, strlen(record->hostname));
+  struct nameset_record *record;
+  uint hash;
+
+  hash = full_name_hash(salt, hostname, strlen(hostname));
+
+  rcu_read_lock();
+
+  hash_for_each_possible_rcu(nameset_record_hash, record, hash_node, hash) {
+    if (strcmp(record->setname, setname) == 0
+      && strcmp(record->hostname, hostname) == 0) {
+      rcu_read_unlock();
+      return -EEXIST;
+    }
+  }
+
+  rcu_read_unlock();
+
+  record = kmalloc(sizeof(struct nameset_record), GFP_KERNEL);
+  if (record == NULL) {
+    pr_debug("xt_nameset: insert_nameset_record(): insufficient memory\n");
+    return -ENOMEM;
+  }
+  record->hostname = kmalloc(strlen(hostname) + 1, GFP_KERNEL);
+  if (record->hostname == NULL) {
+    pr_debug("xt_nameset: insert_nameset_record(): insufficient memory\n");
+    kfree(record);
+    return -ENOMEM;
+  }
+  memset(record->hostname, 0x00, strlen(hostname) + 1);
+  strcpy(record->hostname, hostname);
+
+  record->setname = kmalloc(strlen(setname) + 1, GFP_KERNEL);
+  if (record->setname == NULL) {
+    pr_debug("xt_nameset: insert_nameset_record(): insufficient memory\n");
+    kfree(record->hostname);
+    kfree(record);
+    return -ENOMEM;
+  }
+  memset(record->setname, 0x00, strlen(setname) + 1);
+  strcpy(record->setname, setname);
 
   spin_lock(&nameset_record_lock);
   hash_add_rcu(nameset_record_hash, &(record->hash_node), hash);
 
   spin_unlock(&nameset_record_lock);
+
+  return 0;
 }
 
-static void
-delete_and_kill_nameset_record(struct nameset_record* record)
+static int
+find_and_kill_nameset_record(const char* setname, const char* hostname)
 {
+  int ret;
+  uint hash;
+  struct nameset_record *record_to_remove, *record;
+  struct hlist_node *tmp;
+
+  ret = 0;
+  hash = full_name_hash(salt, hostname, strlen(hostname));
+  record_to_remove = NULL;
+
   spin_lock(&nameset_record_lock);
-  hash_del_rcu(&(record->hash_node));
+
+  hash_for_each_possible_safe(nameset_record_hash, record, tmp, hash_node, hash) {
+    if (strcmp(record->setname, setname) == 0
+      && strcmp(record->hostname, hostname) == 0) {
+      record_to_remove = record;
+
+      hash_del_rcu(&(record_to_remove->hash_node));
+
+      break;
+    }
+  }
 
   spin_unlock(&nameset_record_lock);
 
   synchronize_rcu();
 
-  kfree(record->hostname);
-  kfree(record->setname);
+  if (record_to_remove != NULL) {
+    kfree(record_to_remove->setname);
+    kfree(record_to_remove->hostname);
+    kfree(record_to_remove);
 
-  kfree(record);
+    return 0;
+  }
+
+
+  return -ENOENT;
 }
 
 static void
 init_nameset_records(void)
 {
-  struct nameset_record *record, *init_record;
+  struct nameset_record *init_record;
   int i;
   for (i = 0; i < ARRAY_SIZE(init_records); i++) {
     init_record = init_records + i;
-    record = kmalloc(sizeof(struct nameset_record), GFP_KERNEL);
-    if (record == NULL) {
-      pr_debug("xt_nameset: init_nameset_records(): insufficient memory\n");
-      continue;
-    }
-    record->hostname = kmalloc(strlen(init_record->hostname) + 1, GFP_KERNEL);
-    if (record->hostname == NULL) {
-      pr_debug("xt_nameset: init_nameset_records(): insufficient memory\n");
-      kfree(record);
-      continue;
-    }
-    memset(record->hostname, 0x00, strlen(init_record->hostname) + 1);
-    strcpy(record->hostname, init_record->hostname);
-
-    record->setname = kmalloc(strlen(init_record->setname) + 1, GFP_KERNEL);
-    if (record->setname == NULL) {
-      pr_debug("xt_nameset: init_nameset_records(): insufficient memory\n");
-      kfree(record->hostname);
-      kfree(record);
-      continue;
-    }
-    memset(record->setname, 0x00, strlen(init_record->setname) + 1);
-    strcpy(record->setname, init_record->setname);
-
-    insert_nameset_record(record);
+    insert_nameset_record(init_record->setname, init_record->hostname);
   }
 }
 
@@ -569,21 +611,21 @@ parse_dns_response(const char* buf, const int length, struct dns_result* result)
   const u_char *rd;
 
   if (local_ns_initparse((const u_char *)buf, length, &msg) < 0) {
-    return -1;
+    return -EINVAL;
   }
 
   rrmax_qd = ns_msg_count(msg, ns_s_qd);
   if (rrmax_qd == 0) {
-    return -2;
+    return -EINVAL;
   }
   rrmax_an = ns_msg_count(msg, ns_s_an);
   if (rrmax_an == 0) {
-    return -3;
+    return -EINVAL;
   }
 
   for (rrnum = 0; rrnum < rrmax_qd; rrnum++) {
     if (local_ns_parserr(&msg, ns_s_qd, rrnum, &rr_qd)) {
-      return -1;
+      return -EINVAL;
     }
     hostname = ns_rr_name(rr_qd);
   }
@@ -595,7 +637,7 @@ parse_dns_response(const char* buf, const int length, struct dns_result* result)
 
   for (rrnum = 0; rrnum < rrmax_an; rrnum++) {
     if (local_ns_parserr(&msg, ns_s_an, rrnum, &rr_an)) {
-      return -1;
+      return -EINVAL;
     }
     type = ns_rr_type(rr_an);
     rd = ns_rr_rdata(rr_an);
