@@ -11,6 +11,7 @@
 #include <linux/udp.h>
 #include <linux/stringhash.h>
 #include <linux/workqueue.h>
+#include <linux/proc_fs.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/x_tables.h>
 
@@ -20,14 +21,16 @@
 #define HASHTABLE_BUCKET_BITS (10)
 
 #define DEFAULT_MAX_DNS_CACHE_LEN (8192)
-#define DEFAULT_MAX_MATCH_RESULT_CACHE_LEN (5)
-#define DNS_CACHE_GC_INTERVAL (500)
+#define DEFAULT_MAX_MATCH_RESULT_CACHE_LEN (8192)
+#define DNS_CACHE_GC_INTERVAL (2000)
 
 #define MAX_SET_NAME_LENGTH (20)
 #define NAME_SET_BUF_CAP (MAX_SET_NAME_LENGTH + 1)
 
 #define DNS_RESULT_MAX_HOSTNAME_LEN (255)
 #define DNS_RESULT_MAX_RR_LEN (10)
+
+#define USER_BUF_LEN (512)
 
 #define HASH_IP(ip) ((int)(ip))
 #define HASH_IP6(ip) ((int)((ip)[0] + (ip)[1] + (ip)[2] + (ip)[3]))
@@ -115,25 +118,30 @@ static void gc_worker(struct work_struct *work);
 static struct workqueue_struct *wq __read_mostly;  
 static DECLARE_DELAYED_WORK(gc_worker_wk, gc_worker);
 
+static DEFINE_MUTEX(user_command_lock);
+static char user_response_buf[USER_BUF_LEN];
+static ssize_t user_response_len;
+static int user_response_ready_read;
+
 static atomic_t cleanup;
 
 static struct nameset_record init_records[] = {
-  {
-    .hostname = "www.google.com",
-    .setname = "testset",
-  },
-  {
-    .hostname = "*.baidu.com",
-    .setname = "testset",
-  },
-  {
-    .hostname = "*.163.com",
-    .setname = "testset",
-  },
-  {
-    .hostname = "music.163.com",
-    .setname = "anotherset",
-  },
+  // {
+  //   .hostname = "www.google.com",
+  //   .setname = "testset",
+  // },
+  // {
+  //   .hostname = "*.baidu.com",
+  //   .setname = "testset",
+  // },
+  // {
+  //   .hostname = "*.163.com",
+  //   .setname = "testset",
+  // },
+  // {
+  //   .hostname = "music.163.com",
+  //   .setname = "anotherset",
+  // },
 };
 
 static int
@@ -281,7 +289,6 @@ find_and_kill_nameset_record(const char* setname, const char* hostname)
 
     return 0;
   }
-
 
   return -ENOENT;
 }
@@ -876,6 +883,156 @@ destroy_all_match_result_cache(void)
   match_result_cache_len = 0;
 }
 
+
+static int
+execute_user_command(char* raw_command)
+{
+  int arg_count, ret;
+  char arg0[20], arg1[30], arg2[255], arg3[50], *tmp;
+  memset(arg0, 0x00, 20);
+  memset(arg1, 0x00, 30);
+  memset(arg2, 0x00, 255);
+  memset(arg3, 0x00, 50);
+  arg_count = sscanf(raw_command, "%19s %29s %254s %49s", arg0, arg1, arg2, arg3);
+
+  if (arg_count < 1) {
+    goto invalid_command;
+  }
+
+  if (strcmp(arg0, "add") == 0) {
+    if (arg_count != 3) {
+      goto invalid_argument;
+    }
+    if (strlen(arg1) < 1 || strlen(arg1) > MAX_SET_NAME_LENGTH) {
+      goto invalid_argument;
+    }
+    if (strlen(arg2) < 1 || strlen(arg2) > 254) {
+      goto invalid_argument;
+    }
+
+    ret = insert_nameset_record(arg1, arg2);
+
+    switch (ret) {
+      case -EINVAL:
+        goto invalid_argument;
+        break;
+      case -EEXIST:
+        memset(user_response_buf, 0x00, USER_BUF_LEN);
+        tmp = "record already exists.\n";
+        strcpy(user_response_buf, tmp);
+        user_response_len = strlen(tmp) + 1;
+        return ret;
+      case 0:
+        memset(user_response_buf, 0x00, USER_BUF_LEN);
+        tmp = "record inserted.\n";
+        strcpy(user_response_buf, tmp);
+        user_response_len = strlen(tmp) + 1;
+        return ret;
+    }
+  }
+
+  if (strcmp(arg0, "del") == 0) {
+    if (arg_count != 3) {
+      goto invalid_argument;
+    }
+    if (strlen(arg1) < 1 || strlen(arg1) > MAX_SET_NAME_LENGTH) {
+      goto invalid_argument;
+    }
+    if (strlen(arg2) < 1 || strlen(arg2) > 254) {
+      goto invalid_argument;
+    }
+
+    ret = find_and_kill_nameset_record(arg1, arg2);
+
+    switch (ret) {
+      case -EINVAL:
+        goto invalid_argument;
+        break;
+      case -ENOENT:
+        memset(user_response_buf, 0x00, USER_BUF_LEN);
+        tmp = "record not found.\n";
+        strcpy(user_response_buf, tmp);
+        user_response_len = strlen(tmp) + 1;
+        return ret;
+      case 0:
+        memset(user_response_buf, 0x00, USER_BUF_LEN);
+        tmp = "record deleted.\n";
+        strcpy(user_response_buf, tmp);
+        user_response_len = strlen(tmp) + 1;
+        return ret;
+    }
+  }
+
+invalid_command:
+  memset(user_response_buf, 0x00, USER_BUF_LEN);
+  tmp = "invalid command.\n";
+  strcpy(user_response_buf, tmp);
+  user_response_len = strlen(tmp) + 1;
+  return -EINVAL;
+
+invalid_argument:
+  memset(user_response_buf, 0x00, USER_BUF_LEN);
+  tmp = "invalid arguments.\n";
+  strcpy(user_response_buf, tmp);
+  user_response_len = strlen(tmp) + 1;
+  return -EINVAL;
+}
+
+static int
+user_open_proc(struct inode *node, struct file *file)
+{
+  mutex_lock(&user_command_lock);
+
+  user_response_ready_read = 1;
+
+  mutex_unlock(&user_command_lock);
+
+  return 0;
+}
+
+static ssize_t
+user_read_proc(struct file *p_file, char *buf, size_t count, loff_t *p_off)
+{
+  count = user_response_len < count ? user_response_len : count;
+  mutex_lock(&user_command_lock);
+
+  if (!user_response_ready_read) {
+    mutex_unlock(&user_command_lock);
+    return 0;
+  }
+
+  copy_to_user(buf, user_response_buf, count);
+
+  user_response_ready_read = 0;
+
+  mutex_unlock(&user_command_lock);
+
+  return count;
+}
+
+static ssize_t
+user_write_proc(struct file *p_file, const char *buf, size_t count, loff_t *p_off)
+{
+  char user_command_buf[USER_BUF_LEN];
+
+  count = USER_BUF_LEN < count ? USER_BUF_LEN : count;
+
+  mutex_lock(&user_command_lock);
+
+  copy_from_user(user_command_buf, buf, count);
+  execute_user_command(user_command_buf);
+
+  mutex_unlock(&user_command_lock);
+
+  return count;
+}
+
+struct file_operations proc_fops = {
+  read: user_read_proc,
+  write: user_write_proc,
+  open: user_open_proc,
+};
+
 static struct xt_target nameset_targets[] __read_mostly = {
   {
     .name       = "NAMESET",
@@ -916,6 +1073,11 @@ static int __init nameset_init(void)
   queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(DNS_CACHE_GC_INTERVAL));
   pr_debug("xt_nameset: nameset_init\n");
 
+  memset(user_response_buf, 0x00, USER_BUF_LEN);
+  user_response_len = 0;
+  user_response_ready_read = 0;
+  proc_create("nameset_command", S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP, init_net.proc_net, &proc_fops);
+
   xt_register_matches(nameset_matches, ARRAY_SIZE(nameset_matches));
   return xt_register_targets(nameset_targets, ARRAY_SIZE(nameset_targets));
 }
@@ -923,6 +1085,8 @@ static int __init nameset_init(void)
 static void nameset_exit(void)
 {
   atomic_set(&cleanup, 1);
+
+  remove_proc_entry("nameset_command", init_net.proc_net);
 
   xt_unregister_matches(nameset_matches, ARRAY_SIZE(nameset_matches));
   xt_unregister_targets(nameset_targets, ARRAY_SIZE(nameset_targets));
