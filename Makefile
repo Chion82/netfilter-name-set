@@ -1,6 +1,6 @@
 obj-m += xt_nameset.o
 xt_nameset-objs := resolv.o local_ns_parser.o xt_nameset_main.o
-CFLAGS_xt_nameset_main.o := -DDEBUG -Wall
+CFLAGS_xt_nameset_main.o := $(CFLAGS)
 
 all:
 	make clean
