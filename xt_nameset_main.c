@@ -22,7 +22,7 @@
 
 #define DEFAULT_MAX_DNS_CACHE_LEN (8192)
 #define DEFAULT_MAX_MATCH_RESULT_CACHE_LEN (8192)
-#define DNS_CACHE_GC_INTERVAL (2000)
+#define GC_WORKER_INTERVAL (2000)
 
 #define MAX_SET_NAME_LENGTH (20)
 #define NAME_SET_BUF_CAP (MAX_SET_NAME_LENGTH + 1)
@@ -126,22 +126,7 @@ static int user_response_ready_read;
 static atomic_t cleanup;
 
 static struct nameset_record init_records[] = {
-  // {
-  //   .hostname = "www.google.com",
-  //   .setname = "testset",
-  // },
-  // {
-  //   .hostname = "*.baidu.com",
-  //   .setname = "testset",
-  // },
-  // {
-  //   .hostname = "*.163.com",
-  //   .setname = "testset",
-  // },
-  // {
-  //   .hostname = "music.163.com",
-  //   .setname = "anotherset",
-  // },
+
 };
 
 static int
@@ -219,36 +204,41 @@ insert_nameset_record(const char* setname, const char* hostname)
     }
   }
 
-  rcu_read_unlock();
-
-  record = kmalloc(sizeof(struct nameset_record), GFP_KERNEL);
+  record = kmalloc(sizeof(struct nameset_record), GFP_ATOMIC);
   if (record == NULL) {
     pr_debug("xt_nameset: insert_nameset_record(): insufficient memory\n");
+    rcu_read_unlock();
     return -ENOMEM;
   }
-  record->hostname = kmalloc(strlen(hostname) + 1, GFP_KERNEL);
+  record->hostname = kmalloc(strlen(hostname) + 1, GFP_ATOMIC);
   if (record->hostname == NULL) {
     pr_debug("xt_nameset: insert_nameset_record(): insufficient memory\n");
     kfree(record);
+    rcu_read_unlock();
     return -ENOMEM;
   }
   memset(record->hostname, 0x00, strlen(hostname) + 1);
   strcpy(record->hostname, hostname);
 
-  record->setname = kmalloc(strlen(setname) + 1, GFP_KERNEL);
+  record->setname = kmalloc(strlen(setname) + 1, GFP_ATOMIC);
   if (record->setname == NULL) {
     pr_debug("xt_nameset: insert_nameset_record(): insufficient memory\n");
     kfree(record->hostname);
     kfree(record);
+    rcu_read_unlock();
     return -ENOMEM;
   }
   memset(record->setname, 0x00, strlen(setname) + 1);
   strcpy(record->setname, setname);
 
-  spin_lock(&nameset_record_lock);
+  spin_lock_bh(&nameset_record_lock);
   hash_add_rcu(nameset_record_hash, &(record->hash_node), hash);
 
-  spin_unlock(&nameset_record_lock);
+  spin_unlock_bh(&nameset_record_lock);
+
+  rcu_read_unlock();
+
+  pr_debug("xt_nameset: record inserted: %s %s\n", setname, hostname);
 
   return 0;
 }
@@ -265,7 +255,7 @@ find_and_kill_nameset_record(const char* setname, const char* hostname)
   hash = full_name_hash(salt, hostname, strlen(hostname));
   record_to_remove = NULL;
 
-  spin_lock(&nameset_record_lock);
+  spin_lock_bh(&nameset_record_lock);
 
   hash_for_each_possible_safe(nameset_record_hash, record, tmp, hash_node, hash) {
     if (strcmp(record->setname, setname) == 0
@@ -278,7 +268,7 @@ find_and_kill_nameset_record(const char* setname, const char* hostname)
     }
   }
 
-  spin_unlock(&nameset_record_lock);
+  spin_unlock_bh(&nameset_record_lock);
 
   synchronize_rcu();
 
@@ -286,6 +276,8 @@ find_and_kill_nameset_record(const char* setname, const char* hostname)
     kfree(record_to_remove->setname);
     kfree(record_to_remove->hostname);
     kfree(record_to_remove);
+
+    pr_debug("xt_nameset: record deleted: %s %s\n", setname, hostname);
 
     return 0;
   }
@@ -392,7 +384,7 @@ get_match_result(__be32* addr, const int is_ip6)
     return NULL;
   }
 
-  spin_lock(&match_result_cache_lock);
+  spin_lock_bh(&match_result_cache_lock);
 
   hash_add_rcu(match_result_cache_hash, &(result->hash_node), ip_hash);
   list_add_rcu(&(result->list), &match_result_cache_list);
@@ -400,7 +392,7 @@ get_match_result(__be32* addr, const int is_ip6)
 
   pr_debug("xt_nameset: created new match result cache \n");
 
-  spin_unlock(&match_result_cache_lock);
+  spin_unlock_bh(&match_result_cache_lock);
 
   return result;
 }
@@ -429,14 +421,16 @@ insert_dns_cache(struct dns_result* dr)
         break;
       }
     }
-    rcu_read_unlock();
 
-    if (exists)
+    if (exists) {
+      rcu_read_unlock();
       continue;
+    }
 
     item = kmalloc(sizeof(struct dns_cache_item), GFP_ATOMIC);
     if (item == NULL){
       pr_debug("xt_nameset: insert_dns_cache(): insufficient memory\n");
+      rcu_read_unlock();
       return;
     }
     item->is_ip6 = 0;
@@ -445,6 +439,7 @@ insert_dns_cache(struct dns_result* dr)
     if (item == NULL){
       kfree(item);
       pr_debug("xt_nameset: insert_dns_cache(): insufficient memory\n");
+      rcu_read_unlock();
       return;
     }
     memset(new_hostname, 0x00, strlen(hostname) + 1);
@@ -452,17 +447,18 @@ insert_dns_cache(struct dns_result* dr)
 
     item->hostname = new_hostname;
 
-    spin_lock(&dns_cache_lock);
+    spin_lock_bh(&dns_cache_lock);
 
     hash_add_rcu(dns_cache_hash, &(item->hash_node), hash);
     list_add_rcu(&(item->list), &dns_cache_list);
 
     dns_cache_len++;
 
-    spin_unlock(&dns_cache_lock);
+    spin_unlock_bh(&dns_cache_lock);
 
     pr_debug("xt_nameset: add dns cache: %s - %pI4\n", item->hostname, &(item->addr.ip));
 
+    rcu_read_unlock();
   }
 
   for (i = 0; i < dr->aaaa_result_len; i++) {
@@ -479,14 +475,16 @@ insert_dns_cache(struct dns_result* dr)
         break;
       }
     }
-    rcu_read_unlock();
 
-    if (exists)
+    if (exists) {
+      rcu_read_unlock();
       continue;
+    }
 
     item = kmalloc(sizeof(struct dns_cache_item), GFP_ATOMIC);
     if (item == NULL){
       pr_debug("xt_nameset: insert_dns_cache(): insufficient memory\n");
+      rcu_read_unlock();
       return;
     }
     item->is_ip6 = 1;
@@ -495,6 +493,7 @@ insert_dns_cache(struct dns_result* dr)
     if (item == NULL){
       kfree(item);
       pr_debug("xt_nameset: insert_dns_cache(): insufficient memory\n");
+      rcu_read_unlock();
       return;
     }
     memset(new_hostname, 0x00, strlen(hostname) + 1);
@@ -502,17 +501,18 @@ insert_dns_cache(struct dns_result* dr)
 
     item->hostname = new_hostname;
 
-    spin_lock(&dns_cache_lock);
+    spin_lock_bh(&dns_cache_lock);
 
     hash_add_rcu(dns_cache_hash, &(item->hash_node), hash);
     list_add_rcu(&(item->list), &dns_cache_list);
 
     dns_cache_len++;
 
-    spin_unlock(&dns_cache_lock);
+    spin_unlock_bh(&dns_cache_lock);
 
     pr_debug("xt_nameset: add dns cache: %s - %pI6\n", item->hostname, &(item->addr.ip6));
 
+    rcu_read_unlock();
   }
 }
 
@@ -526,7 +526,7 @@ remove_outdated_match_result_cache(void)
 
 delete_one:
   
-  spin_lock(&match_result_cache_lock);
+  spin_lock_bh(&match_result_cache_lock);
 
   item_to_remove = NULL;
 
@@ -546,7 +546,7 @@ delete_one:
     remove_count++;
   }
 
-  spin_unlock(&match_result_cache_lock);
+  spin_unlock_bh(&match_result_cache_lock);
 
   synchronize_rcu();
 
@@ -568,7 +568,7 @@ remove_outdated_dns_cache(void)
 
 delete_one:
 
-  spin_lock(&dns_cache_lock);
+  spin_lock_bh(&dns_cache_lock);
 
   item_to_remove = NULL;
 
@@ -585,7 +585,7 @@ delete_one:
     pr_debug("xt_nameset: del dns cache: %s\n", item_to_remove->hostname);
   }
 
-  spin_unlock(&dns_cache_lock);
+  spin_unlock_bh(&dns_cache_lock);
 
   synchronize_rcu();
 
@@ -604,7 +604,7 @@ gc_worker(struct work_struct *work)
   remove_outdated_dns_cache();
   remove_outdated_match_result_cache();
   if (atomic_read(&cleanup) == 0)
-    queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(DNS_CACHE_GC_INTERVAL));
+    queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(GC_WORKER_INTERVAL));
 }
 
 static int
@@ -893,6 +893,9 @@ execute_user_command(char* raw_command)
   memset(arg1, 0x00, 30);
   memset(arg2, 0x00, 255);
   memset(arg3, 0x00, 50);
+
+  pr_debug("xt_nameset: exec command: %s\n", raw_command);
+
   arg_count = sscanf(raw_command, "%19s %29s %254s %49s", arg0, arg1, arg2, arg3);
 
   if (arg_count < 1) {
@@ -993,8 +996,9 @@ user_open_proc(struct inode *node, struct file *file)
 static ssize_t
 user_read_proc(struct file *p_file, char *buf, size_t count, loff_t *p_off)
 {
-  count = user_response_len < count ? user_response_len : count;
   mutex_lock(&user_command_lock);
+
+  count = user_response_len < count ? user_response_len : count;
 
   if (!user_response_ready_read) {
     mutex_unlock(&user_command_lock);
@@ -1014,6 +1018,7 @@ static ssize_t
 user_write_proc(struct file *p_file, const char *buf, size_t count, loff_t *p_off)
 {
   char user_command_buf[USER_BUF_LEN];
+  memset(user_command_buf, 0x00, USER_BUF_LEN);
 
   count = USER_BUF_LEN < count ? USER_BUF_LEN : count;
 
@@ -1070,7 +1075,7 @@ static int __init nameset_init(void)
     printk(KERN_ERR "xt_nameset: create_singlethread_workqueue() failed. xt_nameset not registered.\n");
     return 0;
   }
-  queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(DNS_CACHE_GC_INTERVAL));
+  queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(GC_WORKER_INTERVAL));
   pr_debug("xt_nameset: nameset_init\n");
 
   memset(user_response_buf, 0x00, USER_BUF_LEN);
@@ -1098,8 +1103,8 @@ static void nameset_exit(void)
   }
 
   destroy_all_dns_cache();
-  destroy_all_nameset_records();
   destroy_all_match_result_cache();
+  destroy_all_nameset_records();
 }
 
 module_init(nameset_init);
