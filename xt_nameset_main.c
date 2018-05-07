@@ -133,6 +133,8 @@ static char user_response_buf[USER_BUF_LEN];
 static ssize_t user_response_len;
 static int user_response_ready_read;
 
+static int remove_all_match_result_cache __read_mostly = 0;
+
 static atomic_t cleanup;
 
 static struct nameset_record init_records[] = {
@@ -527,7 +529,7 @@ insert_dns_cache(struct dns_result* dr)
 }
 
 static int
-remove_outdated_match_result_cache(void)
+remove_outdated_match_result_cache(const int remove_all)
 {
   int remove_count;
   struct match_result *item_to_remove;
@@ -540,7 +542,7 @@ delete_one:
 
   item_to_remove = NULL;
 
-  if (match_result_cache_len > max_match_result_cache_len
+  if ((match_result_cache_len > max_match_result_cache_len || remove_all)
     && !(list_empty(&match_result_cache_list))) {
     item_to_remove = list_last_entry(&match_result_cache_list, struct match_result, list);
 
@@ -569,7 +571,7 @@ delete_one:
 }
 
 static int
-remove_outdated_dns_cache(void)
+remove_outdated_dns_cache(const int remove_all)
 {
   int remove_count;
   struct dns_cache_item *item_to_remove;
@@ -582,7 +584,7 @@ delete_one:
 
   item_to_remove = NULL;
 
-  if (dns_cache_len > max_dns_cache_len
+  if ((dns_cache_len > max_dns_cache_len || remove_all)
     && !(list_empty(&dns_cache_list))) {
     item_to_remove = list_last_entry(&dns_cache_list, struct dns_cache_item, list);
 
@@ -611,8 +613,11 @@ delete_one:
 static void
 gc_worker(struct work_struct *work)
 {
-  remove_outdated_dns_cache();
-  remove_outdated_match_result_cache();
+  remove_outdated_dns_cache(0);
+  remove_outdated_match_result_cache(remove_all_match_result_cache);
+
+  remove_all_match_result_cache = 0;
+
   if (atomic_read(&cleanup) == 0)
     queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(GC_WORKER_INTERVAL));
 }
@@ -940,6 +945,7 @@ execute_user_command(char* raw_command)
         return ret;
       case 0:
         set_user_response("record inserted.\n");
+        remove_all_match_result_cache = 1;
         return ret;
       default:
         set_user_response("failed to insert record.\n");
@@ -969,6 +975,7 @@ execute_user_command(char* raw_command)
         return ret;
       case 0:
         set_user_response("record deleted.\n");
+        remove_all_match_result_cache = 1;
         return ret;
       default:
         set_user_response("failed to delete record.\n");
