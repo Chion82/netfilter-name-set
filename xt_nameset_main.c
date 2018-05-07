@@ -1102,17 +1102,19 @@ static void nameset_exit(void)
 {
   atomic_set(&cleanup, 1);
 
+  if (!wq) {
+    goto out;
+  }
   remove_proc_entry("nameset_command", init_net.proc_net);
 
   xt_unregister_matches(nameset_matches, ARRAY_SIZE(nameset_matches));
   xt_unregister_targets(nameset_targets, ARRAY_SIZE(nameset_targets));
 
   cancel_delayed_work_sync(&gc_worker_wk);
-  if (wq) {
-    flush_workqueue(wq);
-    destroy_workqueue(wq);
-  }
+  flush_workqueue(wq);
+  destroy_workqueue(wq);
 
+out:
   destroy_all_dns_cache();
   destroy_all_match_result_cache();
   destroy_all_nameset_records();
