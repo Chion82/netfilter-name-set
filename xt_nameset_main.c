@@ -893,18 +893,24 @@ destroy_all_match_result_cache(void)
   match_result_cache_len = 0;
 }
 
+static inline int
+set_user_response(const char *message)
+{
+  memset(user_response_buf, 0x00, USER_BUF_LEN);
+  strcpy(user_response_buf, message);
+  user_response_len = strlen(message) + 1;
+  return user_response_len;
+}
 
 static int
 execute_user_command(char* raw_command)
 {
   int arg_count, ret;
-  char arg0[20], arg1[30], arg2[255], arg3[50], *tmp;
+  char arg0[20], arg1[30], arg2[255], arg3[50];
   memset(arg0, 0x00, 20);
   memset(arg1, 0x00, 30);
   memset(arg2, 0x00, 255);
   memset(arg3, 0x00, 50);
-
-  pr_debug("xt_nameset: exec command: %s\n", raw_command);
 
   arg_count = sscanf(raw_command, "%19s %29s %254s %49s", arg0, arg1, arg2, arg3);
 
@@ -930,16 +936,13 @@ execute_user_command(char* raw_command)
         goto invalid_argument;
         break;
       case -EEXIST:
-        memset(user_response_buf, 0x00, USER_BUF_LEN);
-        tmp = "record already exists.\n";
-        strcpy(user_response_buf, tmp);
-        user_response_len = strlen(tmp) + 1;
+        set_user_response("record already exists.\n");
         return ret;
       case 0:
-        memset(user_response_buf, 0x00, USER_BUF_LEN);
-        tmp = "record inserted.\n";
-        strcpy(user_response_buf, tmp);
-        user_response_len = strlen(tmp) + 1;
+        set_user_response("record inserted.\n");
+        return ret;
+      default:
+        set_user_response("failed to insert record.\n");
         return ret;
     }
   }
@@ -962,32 +965,23 @@ execute_user_command(char* raw_command)
         goto invalid_argument;
         break;
       case -ENOENT:
-        memset(user_response_buf, 0x00, USER_BUF_LEN);
-        tmp = "record not found.\n";
-        strcpy(user_response_buf, tmp);
-        user_response_len = strlen(tmp) + 1;
+        set_user_response("record not found.\n");
         return ret;
       case 0:
-        memset(user_response_buf, 0x00, USER_BUF_LEN);
-        tmp = "record deleted.\n";
-        strcpy(user_response_buf, tmp);
-        user_response_len = strlen(tmp) + 1;
+        set_user_response("record deleted.\n");
+        return ret;
+      default:
+        set_user_response("failed to delete record.\n");
         return ret;
     }
   }
 
 invalid_command:
-  memset(user_response_buf, 0x00, USER_BUF_LEN);
-  tmp = "invalid command.\n";
-  strcpy(user_response_buf, tmp);
-  user_response_len = strlen(tmp) + 1;
+  set_user_response("invalid command.\n");
   return -EINVAL;
 
 invalid_argument:
-  memset(user_response_buf, 0x00, USER_BUF_LEN);
-  tmp = "invalid arguments.\n";
-  strcpy(user_response_buf, tmp);
-  user_response_len = strlen(tmp) + 1;
+  set_user_response("invalid arguments.\n");
   return -EINVAL;
 }
 
