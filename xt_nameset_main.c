@@ -297,6 +297,52 @@ find_and_kill_nameset_record(const char* setname, const char* hostname)
   return -ENOENT;
 }
 
+static int
+flush_nameset_records(const char* setname)
+{
+  int remove_count, hash;
+  struct nameset_record *record_to_remove, *record;
+  struct hlist_node *tmp;
+
+  remove_count = 0;
+
+delete_one:
+
+  spin_lock_bh(&nameset_record_lock);
+
+  record_to_remove = NULL;
+
+  hash_for_each_safe(nameset_record_hash, hash, tmp, record, hash_node) {
+    if (setname == NULL
+      || strcmp(setname, record->setname) == 0) {
+
+      record_to_remove = record;
+      hash_del_rcu(&record_to_remove->hash_node);
+
+      pr_debug("xt_nameset: record deleted: %s %s\n",
+        record_to_remove->setname, record_to_remove->hostname);
+
+      remove_count++;
+
+      break;
+    }
+  }
+
+  spin_unlock_bh(&nameset_record_lock);
+
+  synchronize_rcu();
+
+  if (record_to_remove != NULL) {
+    kfree(record_to_remove->setname);
+    kfree(record_to_remove->hostname);
+    kfree(record_to_remove);
+
+    goto delete_one;
+  }
+
+  return remove_count;
+}
+
 static void
 init_nameset_records(void)
 {
@@ -910,15 +956,17 @@ set_user_response(const char *message)
   return user_response_len;
 }
 
+/* should by called with mutex_lock(&user_command_lock) */
 static int
 execute_user_command(char* raw_command)
 {
   int arg_count, ret;
-  char arg0[20], arg1[30], arg2[255], arg3[50];
+  char arg0[20], arg1[30], arg2[255], arg3[50], tmp_response[USER_BUF_LEN];
   memset(arg0, 0x00, 20);
   memset(arg1, 0x00, 30);
   memset(arg2, 0x00, 255);
   memset(arg3, 0x00, 50);
+  memset(tmp_response, 0x00, USER_BUF_LEN);
 
   arg_count = sscanf(raw_command, "%19s %29s %254s %49s", arg0, arg1, arg2, arg3);
 
@@ -956,9 +1004,7 @@ execute_user_command(char* raw_command)
         set_user_response("failed to insert record.\n");
         return ret;
     }
-  }
-
-  if (strcmp(arg0, "del") == 0) {
+  } else if (strcmp(arg0, "del") == 0) {
     if (arg_count != 3) {
       goto invalid_argument;
     }
@@ -988,6 +1034,35 @@ execute_user_command(char* raw_command)
         set_user_response("failed to delete record.\n");
         return ret;
     }
+  } else if (strcmp(arg0, "flush") == 0) {
+    if (arg_count != 2) {
+      goto invalid_argument;
+    }
+    if (strlen(arg1) < 1 || strlen(arg1) > MAX_SET_NAME_LENGTH) {
+      goto invalid_argument;
+    }
+    ret = flush_nameset_records(arg1);
+    snprintf(tmp_response, USER_BUF_LEN, "%d records deleted.\n", ret);
+    set_user_response(tmp_response);
+    if (ret > 0) {
+      mutex_lock(&gc_lock);
+      remove_all_match_result_cache = 1;
+      mutex_unlock(&gc_lock);
+    }
+    return 0;
+  } else if (strcmp(arg0, "flush_all") == 0) {
+    if (arg_count != 1) {
+      goto invalid_argument;
+    }
+    ret = flush_nameset_records(NULL);
+    snprintf(tmp_response, USER_BUF_LEN, "%d records deleted.\n", ret);
+    set_user_response(tmp_response);
+    if (ret > 0) {
+      mutex_lock(&gc_lock);
+      remove_all_match_result_cache = 1;
+      mutex_unlock(&gc_lock);
+    }
+    return 0;
   }
 
 invalid_command:
@@ -1073,7 +1148,7 @@ nameset_records_proc_show(struct seq_file *m, void *v)
 
   rcu_read_unlock();
 
-  seq_printf(m, "--------------------\n%d records shown.\n", record_id);
+  seq_printf(m, "--------------------------\n%d records shown.\n", record_id);
 
   return 0;
 }
