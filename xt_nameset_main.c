@@ -12,6 +12,7 @@
 #include <linux/stringhash.h>
 #include <linux/workqueue.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/x_tables.h>
 
@@ -1026,6 +1027,8 @@ user_read_proc(struct file *p_file, char *buf, size_t count, loff_t *p_off)
 
   user_response_ready_read = 0;
 
+  set_user_response("command not specified.\n");
+
   mutex_unlock(&user_command_lock);
 
   return count;
@@ -1049,10 +1052,44 @@ user_write_proc(struct file *p_file, const char *buf, size_t count, loff_t *p_of
   return count;
 }
 
-struct file_operations proc_fops = {
+static const struct file_operations proc_fops = {
   read: user_read_proc,
   write: user_write_proc,
   open: user_open_proc,
+};
+
+static int
+nameset_records_proc_show(struct seq_file *m, void *v)
+{
+  struct nameset_record *record;
+  int hash, record_id = 0;
+
+  rcu_read_lock();
+
+  hash_for_each_rcu(nameset_record_hash, hash, record, hash_node) {
+    seq_printf(m, "#%d set: %s, pattern: %s\n", record_id, record->setname, record->hostname);
+    record_id++;
+  }
+
+  rcu_read_unlock();
+
+  seq_printf(m, "--------------------\n%d records shown.\n", record_id);
+
+  return 0;
+}
+
+static int
+nameset_records_proc_open(struct inode *inode, struct  file *file)
+{
+  return single_open(file, nameset_records_proc_show, NULL);
+}
+
+static const struct file_operations nameset_records_proc_fops = {
+  .owner = THIS_MODULE,
+  .open = nameset_records_proc_open,
+  .read = seq_read,
+  .llseek = seq_lseek,
+  .release = single_release,
 };
 
 static struct xt_target nameset_targets[] __read_mostly = {
@@ -1097,6 +1134,7 @@ static int __init nameset_init(void)
   user_response_len = 0;
   user_response_ready_read = 0;
   proc_create("nameset_command", S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP, init_net.proc_net, &proc_fops);
+  proc_create("nameset_records", S_IRUSR | S_IRGRP | S_IROTH, init_net.proc_net, &nameset_records_proc_fops);
 
   xt_register_matches(nameset_matches, ARRAY_SIZE(nameset_matches));
   return xt_register_targets(nameset_targets, ARRAY_SIZE(nameset_targets));
@@ -1108,6 +1146,7 @@ static void nameset_exit(void)
     goto out;
   }
   remove_proc_entry("nameset_command", init_net.proc_net);
+  remove_proc_entry("nameset_records", init_net.proc_net);
 
   xt_unregister_matches(nameset_matches, ARRAY_SIZE(nameset_matches));
   xt_unregister_targets(nameset_targets, ARRAY_SIZE(nameset_targets));
