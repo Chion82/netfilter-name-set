@@ -124,6 +124,7 @@ static DEFINE_HASHTABLE(match_result_cache_hash, HASHTABLE_BUCKET_BITS);
 static LIST_HEAD(match_result_cache_list);
 static DEFINE_SPINLOCK(match_result_cache_lock);
 
+static DEFINE_MUTEX(gc_lock);
 static void gc_worker(struct work_struct *work);
 static struct workqueue_struct *wq __read_mostly;  
 static DECLARE_DELAYED_WORK(gc_worker_wk, gc_worker);
@@ -134,8 +135,6 @@ static ssize_t user_response_len;
 static int user_response_ready_read;
 
 static int remove_all_match_result_cache __read_mostly = 0;
-
-static atomic_t cleanup;
 
 static struct nameset_record init_records[] = {
 
@@ -613,13 +612,16 @@ delete_one:
 static void
 gc_worker(struct work_struct *work)
 {
+  mutex_lock(&gc_lock);
+
   remove_outdated_dns_cache(0);
   remove_outdated_match_result_cache(remove_all_match_result_cache);
 
   remove_all_match_result_cache = 0;
 
-  if (atomic_read(&cleanup) == 0)
-    queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(GC_WORKER_INTERVAL));
+  queue_delayed_work(wq, &gc_worker_wk, msecs_to_jiffies(GC_WORKER_INTERVAL));
+
+  mutex_unlock(&gc_lock);
 }
 
 static int
@@ -945,7 +947,9 @@ execute_user_command(char* raw_command)
         return ret;
       case 0:
         set_user_response("record inserted.\n");
+        mutex_lock(&gc_lock);
         remove_all_match_result_cache = 1;
+        mutex_unlock(&gc_lock);
         return ret;
       default:
         set_user_response("failed to insert record.\n");
@@ -975,7 +979,9 @@ execute_user_command(char* raw_command)
         return ret;
       case 0:
         set_user_response("record deleted.\n");
+        mutex_lock(&gc_lock);
         remove_all_match_result_cache = 1;
+        mutex_unlock(&gc_lock);
         return ret;
       default:
         set_user_response("failed to delete record.\n");
@@ -1077,8 +1083,6 @@ static struct xt_match nameset_matches[] __read_mostly = {
 
 static int __init nameset_init(void)
 {
-  atomic_set(&cleanup, 0);
-
   init_nameset_records();
 
   wq = create_singlethread_workqueue("xt_nameset");
@@ -1100,8 +1104,6 @@ static int __init nameset_init(void)
 
 static void nameset_exit(void)
 {
-  atomic_set(&cleanup, 1);
-
   if (!wq) {
     goto out;
   }
