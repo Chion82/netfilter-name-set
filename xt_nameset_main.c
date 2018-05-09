@@ -81,12 +81,14 @@ struct dns_cache_item {
   char is_ip6;
   struct hlist_node hash_node;
   struct list_head list;
+  struct rcu_head rcu;
 };
 
 struct nameset_record {
   char* hostname;
   char* setname;
   struct hlist_node hash_node;
+  struct rcu_head rcu;
 };
 
 struct set_match {
@@ -107,6 +109,7 @@ struct match_result {
 
   struct hlist_node hash_node;
   struct list_head list;
+  struct rcu_head rcu;
 };
 
 static int dns_cache_len = 0;
@@ -176,7 +179,6 @@ fnmatch(char str[], char pattern[], int n, int m)
   return lookup[n][m];
 }
 
-/* should only be called after synchronize_rcu() */
 static void
 kill_match_result(struct match_result *result)
 {
@@ -206,12 +208,12 @@ insert_nameset_record(const char* setname, const char* hostname)
 
   hash = full_name_hash(salt, hostname, strlen(hostname));
 
-  rcu_read_lock();
+  spin_lock_bh(&nameset_record_lock);
 
-  hash_for_each_possible_rcu(nameset_record_hash, record, hash_node, hash) {
+  hash_for_each_possible(nameset_record_hash, record, hash_node, hash) {
     if (strcmp(record->setname, setname) == 0
       && strcmp(record->hostname, hostname) == 0) {
-      rcu_read_unlock();
+      spin_unlock_bh(&nameset_record_lock);
       return -EEXIST;
     }
   }
@@ -219,14 +221,14 @@ insert_nameset_record(const char* setname, const char* hostname)
   record = kmalloc(sizeof(struct nameset_record), GFP_ATOMIC);
   if (record == NULL) {
     pr_debug("xt_nameset: insert_nameset_record(): insufficient memory\n");
-    rcu_read_unlock();
+    spin_unlock_bh(&nameset_record_lock);
     return -ENOMEM;
   }
   record->hostname = kmalloc(strlen(hostname) + 1, GFP_ATOMIC);
   if (record->hostname == NULL) {
     pr_debug("xt_nameset: insert_nameset_record(): insufficient memory\n");
     kfree(record);
-    rcu_read_unlock();
+    spin_unlock_bh(&nameset_record_lock);
     return -ENOMEM;
   }
   memset(record->hostname, 0x00, strlen(hostname) + 1);
@@ -237,62 +239,57 @@ insert_nameset_record(const char* setname, const char* hostname)
     pr_debug("xt_nameset: insert_nameset_record(): insufficient memory\n");
     kfree(record->hostname);
     kfree(record);
-    rcu_read_unlock();
+    spin_unlock_bh(&nameset_record_lock);
     return -ENOMEM;
   }
   memset(record->setname, 0x00, strlen(setname) + 1);
   strcpy(record->setname, setname);
 
-  spin_lock_bh(&nameset_record_lock);
   hash_add_rcu(nameset_record_hash, &(record->hash_node), hash);
 
   spin_unlock_bh(&nameset_record_lock);
-
-  rcu_read_unlock();
 
   pr_debug("xt_nameset: record inserted: %s %s\n", setname, hostname);
 
   return 0;
 }
 
+static void
+free_nameset_record_rcu(struct rcu_head *rp)
+{
+  struct nameset_record *record = container_of(rp, struct nameset_record, rcu);
+  kfree(record->setname);
+  kfree(record->hostname);
+  kfree(record);
+}
+
 static int
 find_and_kill_nameset_record(const char* setname, const char* hostname)
 {
-  int ret;
   uint hash;
-  struct nameset_record *record_to_remove, *record;
+  struct nameset_record *record;
   struct hlist_node *tmp;
 
-  ret = 0;
   hash = full_name_hash(salt, hostname, strlen(hostname));
-  record_to_remove = NULL;
 
   spin_lock_bh(&nameset_record_lock);
 
   hash_for_each_possible_safe(nameset_record_hash, record, tmp, hash_node, hash) {
     if (strcmp(record->setname, setname) == 0
       && strcmp(record->hostname, hostname) == 0) {
-      record_to_remove = record;
 
-      hash_del_rcu(&(record_to_remove->hash_node));
+      hash_del_rcu(&record->hash_node);
 
-      break;
+      pr_debug("xt_nameset: record deleted: %s %s\n", record->setname, record->hostname);
+
+      call_rcu(&record->rcu, free_nameset_record_rcu);
+
+      spin_unlock_bh(&nameset_record_lock);
+      return 0;
     }
   }
 
   spin_unlock_bh(&nameset_record_lock);
-
-  synchronize_rcu();
-
-  if (record_to_remove != NULL) {
-    kfree(record_to_remove->setname);
-    kfree(record_to_remove->hostname);
-    kfree(record_to_remove);
-
-    pr_debug("xt_nameset: record deleted: %s %s\n", setname, hostname);
-
-    return 0;
-  }
 
   return -ENOENT;
 }
@@ -301,44 +298,29 @@ static int
 flush_nameset_records(const char* setname)
 {
   int remove_count, hash;
-  struct nameset_record *record_to_remove, *record;
+  struct nameset_record *record;
   struct hlist_node *tmp;
 
   remove_count = 0;
 
-delete_one:
-
   spin_lock_bh(&nameset_record_lock);
-
-  record_to_remove = NULL;
 
   hash_for_each_safe(nameset_record_hash, hash, tmp, record, hash_node) {
     if (setname == NULL
       || strcmp(setname, record->setname) == 0) {
 
-      record_to_remove = record;
-      hash_del_rcu(&record_to_remove->hash_node);
+      hash_del_rcu(&record->hash_node);
 
       pr_debug("xt_nameset: record deleted: %s %s\n",
-        record_to_remove->setname, record_to_remove->hostname);
+        record->setname, record->hostname);
+
+      call_rcu(&record->rcu, free_nameset_record_rcu);
 
       remove_count++;
-
-      break;
     }
   }
 
   spin_unlock_bh(&nameset_record_lock);
-
-  synchronize_rcu();
-
-  if (record_to_remove != NULL) {
-    kfree(record_to_remove->setname);
-    kfree(record_to_remove->hostname);
-    kfree(record_to_remove);
-
-    goto delete_one;
-  }
 
   return remove_count;
 }
@@ -376,6 +358,11 @@ get_match_result(__be32* addr, const int is_ip6)
     ip_hash = HASH_IP(ip);
   }
 
+  /* we use rcu_read_lock() here to search for an existing cache result and
+   * if we cannot find one we insert a new record later with spin_lock().
+   * There might be a chance that 2 same items are inserted simultaneously.
+   * But it's totally acceptable and the performance for rcu-read-only searching
+   * is more important. Same for dns cache. */
   hash_for_each_possible_rcu(match_result_cache_hash, cache_result, hash_node, ip_hash) {
     if (is_ip6 && cache_result->is_ip6 == is_ip6
       && IP6_EQUAL(cache_result->addr.ip6, ip6)) {
@@ -574,6 +561,13 @@ insert_dns_cache(struct dns_result* dr)
   }
 }
 
+static void
+free_match_result_cache_rcu(struct rcu_head *rp)
+{
+  struct match_result *item_to_remove = container_of(rp, struct match_result, rcu);
+  kill_match_result(item_to_remove);
+}
+
 static int
 remove_outdated_match_result_cache(const int remove_all)
 {
@@ -582,9 +576,9 @@ remove_outdated_match_result_cache(const int remove_all)
 
   remove_count = 0;
 
-delete_one:
-  
   spin_lock_bh(&match_result_cache_lock);
+
+delete_one:
 
   item_to_remove = NULL;
 
@@ -600,20 +594,26 @@ delete_one:
     } else {
       pr_debug("xt_nameset: del match result cache: %pI4\n", &(item_to_remove->addr.ip));
     }
+
+    call_rcu(&item_to_remove->rcu, free_match_result_cache_rcu);
+
     match_result_cache_len--;
     remove_count++;
+
+    goto delete_one;
   }
 
   spin_unlock_bh(&match_result_cache_lock);
 
-  synchronize_rcu();
-
-  if (item_to_remove != NULL) {
-    kill_match_result(item_to_remove);
-    goto delete_one;
-  }
-
   return remove_count;
+}
+
+static void
+free_dns_cache_rcu(struct rcu_head *rp)
+{
+  struct dns_cache_item *item_to_remove = container_of(rp, struct dns_cache_item, rcu);
+  kfree(item_to_remove->hostname);
+  kfree(item_to_remove);
 }
 
 static int
@@ -624,9 +624,9 @@ remove_outdated_dns_cache(const int remove_all)
 
   remove_count = 0;
 
-delete_one:
-
   spin_lock_bh(&dns_cache_lock);
+
+delete_one:
 
   item_to_remove = NULL;
 
@@ -637,21 +637,17 @@ delete_one:
     list_del_rcu(&(item_to_remove->list));
     hash_del_rcu(&(item_to_remove->hash_node));
 
+    pr_debug("xt_nameset: del dns cache: %s\n", item_to_remove->hostname);
+
+    call_rcu(&item_to_remove->rcu, free_dns_cache_rcu);
+
     dns_cache_len--;
     remove_count++;
 
-    pr_debug("xt_nameset: del dns cache: %s\n", item_to_remove->hostname);
+    goto delete_one;
   }
 
   spin_unlock_bh(&dns_cache_lock);
-
-  synchronize_rcu();
-
-  if (item_to_remove != NULL) {
-    kfree(item_to_remove->hostname);
-    kfree(item_to_remove);
-    goto delete_one;
-  }
 
   return remove_count;
 }
