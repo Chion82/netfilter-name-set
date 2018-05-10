@@ -1,2 +1,2 @@
 #!/bin/sh
-export CFLAGS='-DDEBUG -DFLOOD_DEV_TEST -Wall'
+export CFLAGS='-DDEBUG -DFLOOD_DEV_TEST -Wall -g'
