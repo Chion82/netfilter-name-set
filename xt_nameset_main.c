@@ -457,7 +457,6 @@ insert_dns_cache(struct dns_result* dr)
     hash = HASH_IP(ip);
     exists = 0;
 
-    local_bh_disable();
     rcu_read_lock();
     hash_for_each_possible_rcu(dns_cache_hash, item, hash_node, hash) {
       if (item->is_ip6 == 0
@@ -470,7 +469,6 @@ insert_dns_cache(struct dns_result* dr)
 
     if (exists) {
       rcu_read_unlock();
-      local_bh_enable();
       continue;
     }
 
@@ -478,7 +476,6 @@ insert_dns_cache(struct dns_result* dr)
     if (item == NULL){
       pr_debug("xt_nameset: insert_dns_cache(): insufficient memory\n");
       rcu_read_unlock();
-      local_bh_enable();
       return;
     }
     item->is_ip6 = 0;
@@ -488,7 +485,6 @@ insert_dns_cache(struct dns_result* dr)
       kfree(item);
       pr_debug("xt_nameset: insert_dns_cache(): insufficient memory\n");
       rcu_read_unlock();
-      local_bh_enable();
       return;
     }
     memset(new_hostname, 0x00, strlen(hostname) + 1);
@@ -508,7 +504,6 @@ insert_dns_cache(struct dns_result* dr)
     pr_debug("xt_nameset: add dns cache: %s - %pI4\n", item->hostname, &(item->addr.ip));
 
     rcu_read_unlock();
-    local_bh_enable();
   }
 
   for (i = 0; i < dr->aaaa_result_len; i++) {
@@ -516,7 +511,6 @@ insert_dns_cache(struct dns_result* dr)
     hash = HASH_IP6(ip6);
     exists = 0;
 
-    local_bh_disable();
     rcu_read_lock();
     hash_for_each_possible_rcu(dns_cache_hash, item, hash_node, hash) {
       if (item->is_ip6 == 1
@@ -529,7 +523,6 @@ insert_dns_cache(struct dns_result* dr)
 
     if (exists) {
       rcu_read_unlock();
-      local_bh_enable();
       continue;
     }
 
@@ -537,7 +530,6 @@ insert_dns_cache(struct dns_result* dr)
     if (item == NULL){
       pr_debug("xt_nameset: insert_dns_cache(): insufficient memory\n");
       rcu_read_unlock();
-      local_bh_enable();
       return;
     }
     item->is_ip6 = 1;
@@ -547,7 +539,6 @@ insert_dns_cache(struct dns_result* dr)
       kfree(item);
       pr_debug("xt_nameset: insert_dns_cache(): insufficient memory\n");
       rcu_read_unlock();
-      local_bh_enable();
       return;
     }
     memset(new_hostname, 0x00, strlen(hostname) + 1);
@@ -567,7 +558,6 @@ insert_dns_cache(struct dns_result* dr)
     pr_debug("xt_nameset: add dns cache: %s - %pI6\n", item->hostname, &(item->addr.ip6));
 
     rcu_read_unlock();
-    local_bh_enable();
   }
 }
 
@@ -789,14 +779,12 @@ nameset_match4(const struct sk_buff *skb, struct xt_action_param *par)
 
   setname = info->set_name;
 
-  local_bh_disable();
   rcu_read_lock();
 
   mr = get_match_result(&ip, 0);
 
   if (mr == NULL) {
     rcu_read_unlock();
-    local_bh_enable();
     goto out;
   }
 
@@ -809,7 +797,6 @@ nameset_match4(const struct sk_buff *skb, struct xt_action_param *par)
   }
 
   rcu_read_unlock();
-  local_bh_enable();
 
 out:
   if (invert)
@@ -1148,7 +1135,6 @@ nameset_records_proc_show(struct seq_file *m, void *v)
   struct nameset_record *record;
   int hash, record_id = 0;
 
-  local_bh_disable();
   rcu_read_lock();
 
   hash_for_each_rcu(nameset_record_hash, hash, record, hash_node) {
@@ -1157,7 +1143,6 @@ nameset_records_proc_show(struct seq_file *m, void *v)
   }
 
   rcu_read_unlock();
-  local_bh_enable();
 
   seq_printf(m, "--------------------------\n%d records shown.\n", record_id);
 
