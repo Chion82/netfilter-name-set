@@ -1,0 +1,32 @@
+while [[ True ]]; do
+	dig www.baidu.com
+	dig news.baidu.com
+	dig tieba.baidu.com
+	dig www.163.com
+	dig www.qq.com
+	dig music.163.com
+	dig www.youtube.com
+	dig www.google.com
+	dig news.google.com
+	dig www.twitter.com
+	dig www.facebook.com
+	dig www.sina.com
+	dig www.kernel.org
+	dig www.gmail.com
+	dig map.google.com
+	curl www.sina.com
+	curl www.baidu.com
+	curl tieba.baidu.com
+	curl www.tieba.com
+	curl music.163.com
+	curl news.163.com
+	curl www.163.com
+	curl www.qq.com
+	curl news.qq.com
+	curl www.google.com
+	curl www.youtube.com
+	curl news.google.com
+	curl news.baidu.com
+	curl news.qq.com
+	curl www.weibo.com
+done
