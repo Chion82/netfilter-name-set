@@ -90,6 +90,20 @@ static struct xtables_target NAMESET_targets[] = {
     .save = NAMESET_target_save,
     .help = NAMESET_target_help,
   },
+  {
+    .family = NFPROTO_IPV6,
+    .name = "NAMESET",
+    .version  = XTABLES_VERSION,
+    .size = XT_ALIGN(sizeof(struct xt_nameset_info)),
+    .userspacesize = XT_ALIGN(sizeof(struct xt_nameset_info)),
+    .init = NAMESET_target_init,
+    .x6_options = NAMESET_target_opts,
+    .x6_fcheck = NAMESET_target_check,
+    .x6_parse = NAMESET_target_parse,
+    .print = NAMESET_target_print,
+    .save = NAMESET_target_save,
+    .help = NAMESET_target_help,
+  },
 };
 
 void _init(void)

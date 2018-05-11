@@ -8,6 +8,7 @@
 #include <linux/skbuff.h>
 #include <linux/in.h>
 #include <linux/ip.h>
+#include <linux/ipv6.h>
 #include <linux/udp.h>
 #include <linux/stringhash.h>
 #include <linux/workqueue.h>
@@ -15,6 +16,7 @@
 #include <linux/seq_file.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/x_tables.h>
+#include <net/ipv6.h>
 
 #include "resolv.h"
 #include "local_ns_parser.h"
@@ -65,7 +67,7 @@ struct dns_result {
   char hostname[DNS_RESULT_MAX_HOSTNAME_LEN];
   __be32 a_result[DNS_RESULT_MAX_RR_LEN];
   int a_result_len;
-  __be32 aaaa_result[4][DNS_RESULT_MAX_RR_LEN];
+  __be32 aaaa_result[DNS_RESULT_MAX_RR_LEN][4];
   int aaaa_result_len;
 };
 
@@ -672,7 +674,7 @@ parse_dns_response(const char* buf, const int length, struct dns_result* result)
 {
   ns_msg msg;
   ns_rr rr_qd, rr_an;
-  int rrnum, rrmax_qd, rrmax_an, tmp;
+  int rrnum, rrmax_qd, rrmax_an;
   char *hostname;
   u_int type;
   const u_char *rd;
@@ -717,9 +719,7 @@ parse_dns_response(const char* buf, const int length, struct dns_result* result)
 
     if (type == ns_t_aaaa && rd != NULL
       && result->aaaa_result_len < DNS_RESULT_MAX_RR_LEN) {
-      for (tmp = 0; tmp < 4; tmp++) {
-        result->aaaa_result[result->aaaa_result_len][tmp] = *((__be32*)rd + tmp);
-      }
+      ASSIGN_IP6(result->aaaa_result[result->aaaa_result_len], (__be32*)rd);
       result->aaaa_result_len ++;
     }
   }
@@ -735,6 +735,18 @@ nameset_target4_checkentry(const struct xt_tgchk_param *par)
 
 static void
 nameset_target4_destroy(const struct xt_tgdtor_param *par)
+{
+
+}
+
+static int
+nameset_target6_checkentry(const struct xt_tgchk_param *par)
+{
+  return 0;
+}
+
+static void
+nameset_target6_destroy(const struct xt_tgdtor_param *par)
 {
 
 }
@@ -805,11 +817,71 @@ out:
     return matched;
 }
 
-// static bool
-// nameset_match6(const struct sk_buff *skb, struct xt_action_param *par)
-// {
+static bool
+nameset_match6(const struct sk_buff *skb, struct xt_action_param *par)
+{
+  const struct xt_nameset_info *info;
+  const char* setname;
+  struct ipv6hdr *ip6h;
+  struct match_result *mr;
 
-// }
+  struct set_match *match;
+
+  int matched, invert;
+
+  __be32 ip6[4];
+
+  info = par->matchinfo;
+
+  matched = 0;
+  invert = 0;
+
+  if (info->flags & XT_NAMESET_MATCH_INVERT) {
+    invert = 1;
+  }
+
+  if (skb_network_header_len(skb) < sizeof(struct ipv6hdr)) {
+    goto out;
+  }
+
+  ip6h = ipv6_hdr(skb);
+  if (ip6h == NULL) {
+    goto out;
+  }
+
+  if (info->flags & XT_NAMESET_DST) {
+    ASSIGN_IP6(ip6, ip6h->daddr.in6_u.u6_addr32);
+  } else {
+    ASSIGN_IP6(ip6, ip6h->saddr.in6_u.u6_addr32);
+  }
+
+  setname = info->set_name;
+
+  rcu_read_lock();
+
+  mr = get_match_result(ip6, 1);
+
+  if (mr == NULL) {
+    rcu_read_unlock();
+    goto out;
+  }
+
+  list_for_each_entry(match, &(mr->match_sets), list) {
+    if (strcmp(setname, match->setname) == 0) {
+      matched = 1;
+      pr_debug("xt_nameset: nameset_match6(): %pI6 matches %s\n", ip6, setname);
+      break;
+    }
+  }
+
+  rcu_read_unlock();
+
+out:
+  if (invert)
+    return !matched;
+  else
+    return matched;
+}
 
 static int
 nameset_match4_checkentry(const struct xt_mtchk_param *par)
@@ -817,11 +889,11 @@ nameset_match4_checkentry(const struct xt_mtchk_param *par)
   return 0;
 }
 
-// static int
-// nameset_match6_checkentry(const struct xt_mtchk_param *par)
-// {
-
-// }
+static int
+nameset_match6_checkentry(const struct xt_mtchk_param *par)
+{
+  return 0;
+}
 
 static void
 nameset_match4_destroy(const struct xt_mtdtor_param *par)
@@ -829,11 +901,11 @@ nameset_match4_destroy(const struct xt_mtdtor_param *par)
 
 }
 
-// static void
-// nameset_match6_destroy(const struct xt_mtdtor_param *par)
-// {
+static void
+nameset_match6_destroy(const struct xt_mtdtor_param *par)
+{
 
-// }
+}
 
 static unsigned int
 nameset_target4(struct sk_buff *skb, const struct xt_action_param *par)
@@ -858,6 +930,58 @@ nameset_target4(struct sk_buff *skb, const struct xt_action_param *par)
   }
 
   if (iph->protocol != IPPROTO_UDP) {
+    return ret;
+  }
+
+  udp_payload_len = skb->len - skb_transport_offset(skb) - sizeof(struct udphdr);
+
+  if (udp_payload_len <= 0) {
+    return ret;
+  }
+
+  udph = (struct udphdr*)skb_transport_header(skb);
+  if (udph == NULL) {
+    return ret;
+  }
+
+  if (be16_to_cpu(udph->len) != sizeof(struct udphdr) + udp_payload_len) {
+    pr_debug("xt_nameset: invalid length in udp header.\n");
+    return ret;
+  }
+
+  udp_payload = (char*)udph + sizeof(struct udphdr);
+
+  if (parse_dns_response(udp_payload, udp_payload_len, &dr) != 0) {
+    return ret;
+  }
+  insert_dns_cache(&dr);
+
+  return ret;
+}
+
+static unsigned int
+nameset_target6(struct sk_buff *skb, const struct xt_action_param *par)
+{
+  struct ipv6hdr *ip6h;
+  struct udphdr *udph;
+  int udp_payload_len;
+  char* udp_payload;
+  struct dns_result dr;
+  unsigned int ret;
+
+  ret = XT_CONTINUE;
+
+  if (skb_network_header_len(skb) < sizeof(struct ipv6hdr) ||
+    skb_transport_offset(skb) <= 0) {
+    return ret;
+  }
+
+  ip6h = ipv6_hdr(skb);
+  if (ip6h == NULL) {
+    return ret;
+  }
+
+  if (ip6h->nexthdr != NEXTHDR_UDP) {
     return ret;
   }
 
@@ -1173,7 +1297,17 @@ static struct xt_target nameset_targets[] __read_mostly = {
     .checkentry = nameset_target4_checkentry,
     .destroy    = nameset_target4_destroy,
     .me         = THIS_MODULE,
-    },
+  },
+  {
+    .name       = "NAMESET",
+    .family     = NFPROTO_IPV6,
+    .revision   = 0,
+    .target     = nameset_target6,
+    .targetsize = sizeof(struct xt_nameset_info),
+    .checkentry = nameset_target6_checkentry,
+    .destroy    = nameset_target6_destroy,
+    .me         = THIS_MODULE,
+  },
 };
 
 static struct xt_match nameset_matches[] __read_mostly = {
@@ -1185,6 +1319,16 @@ static struct xt_match nameset_matches[] __read_mostly = {
     .matchsize  = sizeof(struct xt_nameset_info),
     .checkentry = nameset_match4_checkentry,
     .destroy    = nameset_match4_destroy,
+    .me         = THIS_MODULE,
+  },
+  {
+    .name       = "nameset",
+    .family     = NFPROTO_IPV6,
+    .revision   = 0,
+    .match      = nameset_match6,
+    .matchsize  = sizeof(struct xt_nameset_info),
+    .checkentry = nameset_match6_checkentry,
+    .destroy    = nameset_match6_destroy,
     .me         = THIS_MODULE,
   },
 };
@@ -1237,4 +1381,3 @@ module_init(nameset_init);
 module_exit(nameset_exit);
 
 MODULE_LICENSE("GPL");
-

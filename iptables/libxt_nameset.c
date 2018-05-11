@@ -128,6 +128,20 @@ static struct xtables_match nameset_matches[] = {
     .save = nameset_match_save,
     .help = nameset_match_help,
   },
+  {
+    .family = NFPROTO_IPV6,
+    .name = "nameset",
+    .version  = XTABLES_VERSION,
+    .size = XT_ALIGN(sizeof(struct xt_nameset_info)),
+    .userspacesize = XT_ALIGN(sizeof(struct xt_nameset_info)),
+    .init = nameset_match_init,
+    .x6_options = nameset_match_opts,
+    .x6_fcheck = nameset_match_check,
+    .x6_parse = nameset_match_parse,
+    .print = nameset_match_print,
+    .save = nameset_match_save,
+    .help = nameset_match_help,
+  },
 };
 
 void _init(void)

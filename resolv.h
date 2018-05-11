@@ -4,7 +4,7 @@
  * Define constants based on RFC 883, RFC 1034, RFC 1035
  */
 #define NS_PACKETSZ 512 /*%< default UDP packet size */
-#define NS_MAXDNAME 1025  /*%< maximum domain name */
+#define NS_MAXDNAME 255  /*%< maximum domain name */
 #define NS_MAXMSG 65535 /*%< maximum message size */
 #define NS_MAXCDNAME  255 /*%< maximum compressed domain name */
 #define NS_MAXLABEL 63  /*%< maximum length of domain label */
