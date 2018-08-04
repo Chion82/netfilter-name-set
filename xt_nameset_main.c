@@ -767,12 +767,12 @@ skb_lookup_header(const struct sk_buff *skb, int is_ip6,
     if (unlikely(ip6h == NULL)) {
       return -EINVAL;
     }
-    ip_packet_len = ((char*) skb_tail_pointer(skb)) - ((char*) ip6h);
-    if (unlikely(ip_packet_len < sizeof(struct ipv6hdr))) {
+    if (unlikely(skb->len < sizeof(struct ipv6hdr))) {
       return -ENOSPC;
     }
-    if (unlikely(be16_to_cpu(ip6h->payload_len) != ip_packet_len - sizeof(struct ipv6hdr))) {
-      return -EINVAL;
+    ip_packet_len = be16_to_cpu(ip6h->payload_len) + sizeof(struct ipv6hdr);
+    if (unlikely(ip_packet_len < skb->len)) {
+      return -ENOSPC;
     }
     if (udp && ip6h->nexthdr != NEXTHDR_UDP) {
       return -EINVAL;
@@ -784,12 +784,12 @@ skb_lookup_header(const struct sk_buff *skb, int is_ip6,
     if (unlikely(iph == NULL)) {
       return -EINVAL;
     }
-    ip_packet_len = ((char*) skb_tail_pointer(skb) - (char*) iph);
-    if (unlikely(ip_packet_len < sizeof(struct iphdr))) {
+    if (unlikely(skb->len < sizeof(struct iphdr))) {
       return -ENOSPC;
     }
-    if (unlikely(be16_to_cpu(iph->tot_len) != ip_packet_len)) {
-      return -EINVAL;
+    ip_packet_len = be16_to_cpu(iph->tot_len);
+    if (unlikely(ip_packet_len < skb->len)) {
+      return -ENOSPC;
     }
     if (udp && iph->protocol != IPPROTO_UDP) {
       return -EINVAL;
