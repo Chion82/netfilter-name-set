@@ -1,16 +1,23 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/version.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/list.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0)
 #include <linux/hashtable.h>
+#endif
 #include <linux/skbuff.h>
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/udp.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
 #include <linux/stringhash.h>
+#else
+#include <linux/dcache.h>
+#endif
 #include <linux/workqueue.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -20,6 +27,10 @@
 
 #include "resolv.h"
 #include "local_ns_parser.h"
+
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(3, 8, 0)
+#include "hashtable-compat.h"
+#endif
 
 #define HASHTABLE_BUCKET_BITS (10)
 
@@ -208,7 +219,11 @@ insert_nameset_record(const char* setname, const char* hostname)
   struct nameset_record *record;
   uint hash;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
   hash = full_name_hash(salt, hostname, strlen(hostname));
+#else
+  hash = full_name_hash(hostname, strlen(hostname));
+#endif
 
   spin_lock_bh(&nameset_record_lock);
 
@@ -272,7 +287,11 @@ find_and_kill_nameset_record(const char* setname, const char* hostname)
   struct nameset_record *record;
   struct hlist_node *tmp;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
   hash = full_name_hash(salt, hostname, strlen(hostname));
+#else
+  hash = full_name_hash(hostname, strlen(hostname));
+#endif
 
   spin_lock_bh(&nameset_record_lock);
 
