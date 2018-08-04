@@ -794,8 +794,8 @@ skb_lookup_header(const struct sk_buff *skb, int is_ip6,
     if (udp && iph->protocol != IPPROTO_UDP) {
       return -EINVAL;
     }
-    transport_header = (char*) iph + sizeof(struct iphdr);
-    transport_packet_len = ip_packet_len - sizeof(struct iphdr);
+    transport_header = (char*) iph + iph->ihl * 4;
+    transport_packet_len = ip_packet_len - iph->ihl * 4;
   }
   if (!udp) {
     return 0;
