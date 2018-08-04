@@ -751,6 +751,70 @@ nameset_target6_destroy(const struct xt_tgdtor_param *par)
 
 }
 
+static int
+skb_lookup_header(const struct sk_buff *skb, int is_ip6,
+      int udp, struct udphdr **p_udph, int *udp_payload_len)
+{
+  const struct iphdr *iph;
+  const struct ipv6hdr *ip6h;
+  struct udphdr *udph;
+  char *transport_header;
+  int ip_packet_len;
+  int transport_packet_len;
+
+  if (is_ip6) {
+    ip6h = ipv6_hdr(skb);
+    if (unlikely(ip6h == NULL)) {
+      return -EINVAL;
+    }
+    ip_packet_len = ((char*) skb_tail_pointer(skb)) - ((char*) ip6h);
+    if (unlikely(ip_packet_len < sizeof(struct ipv6hdr))) {
+      return -ENOSPC;
+    }
+    if (unlikely(be16_to_cpu(ip6h->payload_len) != ip_packet_len - sizeof(struct ipv6hdr))) {
+      return -EINVAL;
+    }
+    if (udp && ip6h->nexthdr != NEXTHDR_UDP) {
+      return -EINVAL;
+    }
+    transport_header = (char*) ip6h + sizeof(struct ipv6hdr);
+    transport_packet_len = ip_packet_len - sizeof(struct ipv6hdr);
+  } else {
+    iph = ip_hdr(skb);
+    if (unlikely(iph == NULL)) {
+      return -EINVAL;
+    }
+    ip_packet_len = ((char*) skb_tail_pointer(skb) - (char*) iph);
+    if (unlikely(ip_packet_len < sizeof(struct iphdr))) {
+      return -ENOSPC;
+    }
+    if (unlikely(be16_to_cpu(iph->tot_len) != ip_packet_len)) {
+      return -EINVAL;
+    }
+    if (udp && iph->protocol != IPPROTO_UDP) {
+      return -EINVAL;
+    }
+    transport_header = (char*) iph + sizeof(struct iphdr);
+    transport_packet_len = ip_packet_len - sizeof(struct iphdr);
+  }
+  if (!udp) {
+    return 0;
+  }
+
+  if (unlikely(transport_packet_len < sizeof(struct udphdr))) {
+    return -ENOSPC;
+  }
+
+  udph = (struct udphdr*) transport_header;
+  if (unlikely(be16_to_cpu(udph->len) != transport_packet_len)) {
+    return -EINVAL;
+  }
+  *udp_payload_len = transport_packet_len - sizeof(struct udphdr);
+  *p_udph = udph;
+
+  return 0;
+}
+
 static bool
 nameset_match4(const struct sk_buff *skb, struct xt_action_param *par)
 {
@@ -774,14 +838,12 @@ nameset_match4(const struct sk_buff *skb, struct xt_action_param *par)
     invert = 1;
   }
 
-  if (skb_network_header_len(skb) < sizeof(struct iphdr)) {
+  if (skb_lookup_header(skb, 0, 0, NULL, NULL)) {
+    printk("xt_nameset: [WARN] nameset_match4(): invalid ip packet.\n");
     goto out;
   }
 
   iph = ip_hdr(skb);
-  if (iph == NULL) {
-    goto out;
-  }
 
   if (info->flags & XT_NAMESET_DST) {
     ip = iph->daddr;
@@ -840,14 +902,12 @@ nameset_match6(const struct sk_buff *skb, struct xt_action_param *par)
     invert = 1;
   }
 
-  if (skb_network_header_len(skb) < sizeof(struct ipv6hdr)) {
+  if (skb_lookup_header(skb, 1, 0, NULL, NULL)) {
+    printk("xt_nameset: [WARN] nameset_match6(): invalid ipv6 packet.\n");
     goto out;
   }
 
   ip6h = ipv6_hdr(skb);
-  if (ip6h == NULL) {
-    goto out;
-  }
 
   if (info->flags & XT_NAMESET_DST) {
     ASSIGN_IP6(ip6, ip6h->daddr.in6_u.u6_addr32);
@@ -910,7 +970,6 @@ nameset_match6_destroy(const struct xt_mtdtor_param *par)
 static unsigned int
 nameset_target4(struct sk_buff *skb, const struct xt_action_param *par)
 {
-  struct iphdr *iph;
   struct udphdr *udph;
   int udp_payload_len;
   char* udp_payload;
@@ -919,33 +978,7 @@ nameset_target4(struct sk_buff *skb, const struct xt_action_param *par)
 
   ret = XT_CONTINUE;
 
-  if (skb_network_header_len(skb) < sizeof(struct iphdr) ||
-    skb_transport_offset(skb) <= 0) {
-    return ret;
-  }
-
-  iph = ip_hdr(skb);
-  if (iph == NULL) {
-    return ret;
-  }
-
-  if (iph->protocol != IPPROTO_UDP) {
-    return ret;
-  }
-
-  udp_payload_len = skb->len - skb_transport_offset(skb) - sizeof(struct udphdr);
-
-  if (udp_payload_len <= 0) {
-    return ret;
-  }
-
-  udph = (struct udphdr*)skb_transport_header(skb);
-  if (udph == NULL) {
-    return ret;
-  }
-
-  if (be16_to_cpu(udph->len) != sizeof(struct udphdr) + udp_payload_len) {
-    pr_debug("xt_nameset: invalid length in udp header.\n");
+  if (skb_lookup_header(skb, 0, 1, &udph, &udp_payload_len)) {
     return ret;
   }
 
@@ -962,7 +995,6 @@ nameset_target4(struct sk_buff *skb, const struct xt_action_param *par)
 static unsigned int
 nameset_target6(struct sk_buff *skb, const struct xt_action_param *par)
 {
-  struct ipv6hdr *ip6h;
   struct udphdr *udph;
   int udp_payload_len;
   char* udp_payload;
@@ -971,33 +1003,7 @@ nameset_target6(struct sk_buff *skb, const struct xt_action_param *par)
 
   ret = XT_CONTINUE;
 
-  if (skb_network_header_len(skb) < sizeof(struct ipv6hdr) ||
-    skb_transport_offset(skb) <= 0) {
-    return ret;
-  }
-
-  ip6h = ipv6_hdr(skb);
-  if (ip6h == NULL) {
-    return ret;
-  }
-
-  if (ip6h->nexthdr != NEXTHDR_UDP) {
-    return ret;
-  }
-
-  udp_payload_len = skb->len - skb_transport_offset(skb) - sizeof(struct udphdr);
-
-  if (udp_payload_len <= 0) {
-    return ret;
-  }
-
-  udph = (struct udphdr*)skb_transport_header(skb);
-  if (udph == NULL) {
-    return ret;
-  }
-
-  if (be16_to_cpu(udph->len) != sizeof(struct udphdr) + udp_payload_len) {
-    pr_debug("xt_nameset: invalid length in udp header.\n");
+  if (skb_lookup_header(skb, 1, 1, &udph, &udp_payload_len)) {
     return ret;
   }
 
