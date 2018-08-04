@@ -788,7 +788,7 @@ skb_lookup_header(const struct sk_buff *skb, int is_ip6,
       return -ENOSPC;
     }
     ip_packet_len = be16_to_cpu(iph->tot_len);
-    if (unlikely(skb->len < ip_packet_len)) {
+    if (unlikely(skb->len < ip_packet_len || skb->len < iph->ihl * 4)) {
       return -ENOSPC;
     }
     if (udp && iph->protocol != IPPROTO_UDP) {
